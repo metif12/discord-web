@@ -40,7 +40,12 @@ pub fn history_state_js() string {
 	return $embed_file('js/history.js').to_string()
 }
 
-// open_thread_js returns the probe that opens a forum post by title.
+// ready_js returns the probe that reports whether a channel has finished loading.
+pub fn ready_js() string {
+	return $embed_file('js/ready.js').to_string()
+}
+
+// open_thread_js returns the probe that finds a forum post by title.
 pub fn open_thread_js() string {
 	return $embed_file('js/open_thread.js').to_string()
 }

@@ -3,6 +3,9 @@ module discord
 import json2 as json
 import cdp
 
+// How long a navigation may take before it is reported as not loading.
+const nav_timeout_ms = 20000
+
 // Browse is the parsed result of the sidebar probe.
 pub struct Browse {
 pub mut:
@@ -347,6 +350,66 @@ fn first_client() !&cdp.Client {
 	return error('no usable tab responded')
 }
 
+// goto_channel navigates the open Discord tab to a channel and waits for it to
+// render.
+//
+// This is the only navigation the server performs, and it is deliberately
+// limited to channel and thread URLs. An arbitrary URL could leave the tab
+// somewhere the server cannot read, and a typo in an id would strand the tab away
+// from the server the caller was reading. The ids are checked as numeric
+// snowflakes and the host is fixed, so every reachable state is a Discord
+// channel and the tab can always be driven back.
+pub fn goto_channel(guild_id string, channel_id string) !string {
+	if !is_id(guild_id) || !is_id(channel_id) {
+		return error('a guild id and a channel id must both be numeric')
+	}
+	return goto_url('https://discord.com/channels/${guild_id}/${channel_id}')
+}
+
+// goto_thread navigates to a forum post by its id.
+pub fn goto_thread(guild_id string, channel_id string, thread_id string) !string {
+	if !is_id(guild_id) || !is_id(channel_id) || !is_id(thread_id) {
+		return error('the guild, channel and thread ids must all be numeric')
+	}
+	return goto_url('https://discord.com/channels/${guild_id}/${channel_id}/${thread_id}')
+}
+
+// ready_script wraps the readiness probe as a callable expression.
+fn ready_script() string {
+	return '(' + ready_js() + ')()'
+}
+
+// goto_url loads a built Discord URL and waits for the channel to render.
+fn goto_url(url string) !string {
+	mut client := first_client() or { return err }
+	client.bring_to_front() or {
+		client.close()
+		return err
+	}
+	client.navigate(url) or {
+		client.close()
+		return err
+	}
+	ready := client.poll_ready(ready_script(), nav_timeout_ms, 400)
+	client.close()
+	if !ready {
+		return error('the channel did not render in time')
+	}
+	return url
+}
+
+// is_id reports whether a string looks like a Discord snowflake: 15 to 22 digits.
+fn is_id(s string) bool {
+	if s.len < 15 || s.len > 22 {
+		return false
+	}
+	for ch in s {
+		if ch < `0` || ch > `9` {
+			return false
+		}
+	}
+	return true
+}
 // probe_object decodes a probe result that is a JSON object rather than a JSON
 // string. The history and collect probes return objects directly because they
 // return their own envelopes.

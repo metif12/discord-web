@@ -32,6 +32,7 @@ fn main() {
 	)
 
 	register_tools(mut &server)
+	register_navigation_tools(mut &server)
 
 	server.serve_stdio() or {
 		eprintln('discord-web: stdio server failed: ${err}')
@@ -220,6 +221,73 @@ fn register_tools(mut server &mcp.Server) {
 	}) or { eprintln('discord-web: failed to register page_status: ${err}') }
 
 	register_history_tools(mut server)
+}
+
+// register_navigation_tools exposes the tools that move the tab between channels.
+//
+// Navigation is the only way to read a whole server, and it is also the riskiest
+// thing this server does: it drives the browser. It is scoped to channel and
+// thread URLs built from numeric ids, so it can never send the tab somewhere
+// unreadable, and never writes anything.
+fn register_navigation_tools(mut server &mcp.Server) {
+	server.add_tool(mcp.Tool{
+		name:        'open_channel'
+		title:       'Open a channel'
+		description: 'Navigate the browser to a channel so its messages can be ' +
+			'read. Use the ids from list_channels. Combine with read_full_history ' +
+			'to read a channel end to end.'
+		input_schema: '{"type":"object","properties":{' +
+			'"guild_id":{"type":"string","description":"Server id from list_channels"},' +
+			'"channel_id":{"type":"string","description":"Channel id from list_channels"}},' +
+			'"required":["guild_id","channel_id"],"additionalProperties":false}'
+		annotations: mcp.ToolAnnotations{
+			read_only_hint:   true
+			destructive_hint: false
+			idempotent_hint:  false
+			open_world_hint:  true
+		}
+	}, fn (_ mcp.Context, arguments string) !mcp.ToolResult {
+		guild := discord.str_arg(arguments, 'guild_id')
+		channel := discord.str_arg(arguments, 'channel_id')
+		if guild == '' || channel == '' {
+			return mcp.tool_text_result('guild_id and channel_id are both required.')
+		}
+		url := discord.goto_channel(guild, channel) or {
+			return failure('Could not open the channel: ${err}')
+		}
+		return mcp.tool_text_result('Opened ${url}. Read it with read_messages for a ' +
+			'quick look or read_full_history for the whole channel.')
+	}) or { eprintln('discord-web: failed to register open_channel: ${err}') }
+
+	server.add_tool(mcp.Tool{
+		name:        'open_thread_url'
+		title:       'Open a forum post by id'
+		description: 'Navigate the browser to a forum post by its id, for a post ' +
+			'whose thread id you already know. Otherwise use open_thread with the ' +
+			'title from read_threads.'
+		input_schema: '{"type":"object","properties":{' +
+			'"guild_id":{"type":"string"},' +
+			'"channel_id":{"type":"string","description":"The forum channel, not the post"},' +
+			'"thread_id":{"type":"string"}},' +
+			'"required":["guild_id","channel_id","thread_id"],"additionalProperties":false}'
+		annotations: mcp.ToolAnnotations{
+			read_only_hint:   true
+			destructive_hint: false
+			idempotent_hint:  false
+			open_world_hint:  true
+		}
+	}, fn (_ mcp.Context, arguments string) !mcp.ToolResult {
+		guild := discord.str_arg(arguments, 'guild_id')
+		channel := discord.str_arg(arguments, 'channel_id')
+		post := discord.str_arg(arguments, 'thread_id')
+		if guild == '' || channel == '' || post == '' {
+			return mcp.tool_text_result('guild_id, channel_id and thread_id are all required.')
+		}
+		url := discord.goto_thread(guild, channel, post) or {
+			return failure('Could not open the post: ${err}')
+		}
+		return mcp.tool_text_result('Opened ${url}. Read it with read_full_history.')
+	}) or { eprintln('discord-web: failed to register open_thread_url: ${err}') }
 }
 
 // register_history_tools exposes the tools that walk a channel's whole history.

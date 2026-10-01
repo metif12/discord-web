@@ -71,24 +71,43 @@ No environment variables are needed.
 | --- | --- |
 | `check_session` | Which account and server the tab is showing. Start here. |
 | `list_channels` | Channels of the open server, plus the servers in the sidebar. |
+| `open_channel` | Navigate the tab to a channel so its messages can be read. |
 | `read_messages` | Messages currently rendered in the open channel. |
 | `read_full_history` | Walk the open channel from the bottom to the start of its history. |
 | `scroll_history` | Where the message list sits, to check on a history walk. |
 | `read_threads` | Posts in an open forum channel, with reply counts. |
-| `open_thread` | Open a forum post so its replies can be read. |
+| `open_thread` | Open a forum post by title, so its replies can be read. |
+| `open_thread_url` | Open a forum post by id. |
 | `page_status` | What the tab is showing, to tell empty from still-loading. |
 
-A sensible sequence:
+To read a whole channel:
 
 ```
-check_session → list_channels → read_full_history
+list_channels → open_channel → read_full_history
 ```
+
+That is enough to walk a server: `list_channels` gives the ids, and each channel
+is opened and read in turn.
 
 In a forum channel:
 
 ```
 read_threads → open_thread → read_full_history
 ```
+
+## Navigation
+
+`open_channel` and `open_thread_url` are the only tools that move the tab, and
+they are the reason a whole server can be read without clicking through Chrome by
+hand. They are scoped tightly on purpose:
+
+- Only `discord.com/channels/<guild>/<channel>[/<thread>]` URLs are reachable.
+  The host is fixed and both ids are validated as numeric snowflakes, so the tab
+  can always be driven back to a readable channel.
+- Nothing is ever typed or sent. There is no tool that composes or submits a
+  message, so a read-only session cannot become a writing one.
+- No URL from a message is ever followed. Links are reported as text; opening one
+  would let a channel decide where the tab goes.
 
 ## How history is read
 
@@ -116,11 +135,12 @@ in its `stopped` reason rather than running until it times out.
 
 These are properties of reading a rendered page, not bugs to be worked around.
 
-- **Only the open tab is read.** To read a different channel, open it in the
-  browser first. There is no navigation: the server will not click around, so it
-  cannot be made to navigate somewhere and get stuck. `open_thread` is the one
-  click, and only within a forum channel already on screen.
+- **Only the open tab is read.** `open_channel` moves it between channels, and it
+  goes nowhere else.
 - **History is bounded by time, not completeness.** See above.
+- **Forum post ids are not listed.** Discord's post cards expose no id in the DOM,
+  so `read_threads` gives titles and `open_thread` opens one by clicking it. Use
+  `open_thread_url` only when you already have a thread id from a URL.
 - **No search.** Discord's search needs the API. This reads what is on screen.
 - **Rendered text only.** Markdown, embeds and code blocks come through as the
   visible text; formatting and attachments are flattened.
@@ -141,7 +161,7 @@ main.v                MCP server: tool registration, output formatting
 discord/parse.v       probe result → V structs
 discord/history.v     drives the history walk: scroll, settle, deduplicate
 discord/web.v         embeds the probe scripts
-discord/js/*.js       the probes: session, list, messages, threads, history, open_thread
+discord/js/*.js       the probes: session, list, messages, threads, history, ready, open_thread
 cdp/client.v          DevTools client: evaluate plus trusted input dispatch
 cdp/http.v            loopback HTTP client for /json/list
 cdp/endpoint.v        picks the Discord tab to attach to

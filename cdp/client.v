@@ -1,5 +1,6 @@
 module cdp
 
+import time
 import json2 as json
 import net.websocket
 
@@ -103,6 +104,56 @@ pub fn (mut c Client) press(key string, key_code int) !void {
 		return err
 	}
 }
+
+// navigate loads a URL in the tab and returns once the document has committed.
+//
+// A full load rather than an in-page route change: Discord's SPA router swallows
+// synthetic navigation, and a real document load is what actually boots the
+// channel view with a fresh message list.
+pub fn (mut c Client) navigate(url string) !void {
+	c.call('Page.navigate', '{"url":${json.encode(url)}}') or { return err }
+}
+
+// wait_for_poll evaluates an expression until it returns true, or the timeout
+// expires. Discord renders a channel asynchronously after a navigation, so
+// reading straight after a load usually returns an empty page.
+
+// now_ms is the monotonic clock in milliseconds.
+fn now_ms() i64 {
+	return time.sys_mono_now() / 1_000_000
+}
+
+// sleep_ms waits for the given number of milliseconds.
+fn sleep_ms(dur int) {
+	time.sleep(dur * time.millisecond)
+}
+
+// poll_ready evaluates a script until it reports that the page is ready.
+//
+// Discord renders a channel asynchronously after a navigation, so a read taken
+// immediately after a load usually sees an empty page. The readiness probe
+// returns a JSON document with an "ok" field, and matching the field name in the
+// raw text avoids decoding it.
+//
+// A failed eval means the socket is busy with the load, so it counts as "not
+// ready" rather than an error; only the timeout decides the outcome.
+pub fn (mut c Client) poll_ready(script string, timeout_ms int, gap_ms int) bool {
+	deadline := now_ms() + i64(timeout_ms)
+	for {
+		raw := c.eval(script) or { json.Any('null') }
+		text := raw as string
+		if text.contains(ready_marker) {
+			return true
+		}
+		if now_ms() > deadline {
+			return false
+		}
+		sleep_ms(gap_ms)
+	}
+}
+
+// ready_marker is the substring the readiness probe's output must contain.
+const ready_marker = '\"ok\":true'
 
 // click sends a trusted left click, which is how a post or link is opened.
 //
