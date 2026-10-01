@@ -1,0 +1,13 @@
+# Build artifacts.
+*.exe
+*.tmp.c
+src.c
+dist/
+
+# Nothing in this project reads a Discord token, but keep a local .env out of
+# version control anyway in case one is ever added.
+.env
+
+# V module cache.
+.vmodules/
+vendor/
