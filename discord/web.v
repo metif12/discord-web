@@ -24,12 +24,6 @@ pub fn messages_js() string {
 	return $embed_file('js/messages.js').to_string()
 }
 
-// scroll_up_js returns a script that scrolls the message list to the top so
-// Discord fetches older history.
-pub fn scroll_up_js() string {
-	return $embed_file('js/scroll_up.js').to_string()
-}
-
 // threads_js reads the post list of an open forum channel.
 pub fn threads_js() string {
 	return $embed_file('js/threads.js').to_string()
@@ -38,6 +32,17 @@ pub fn threads_js() string {
 // status_js reports what the tab is currently showing.
 pub fn status_js() string {
 	return $embed_file('js/status.js').to_string()
+}
+
+// history_state_js returns the probe that reports the message list's state,
+// including the coordinates a wheel event must be aimed at.
+pub fn history_state_js() string {
+	return $embed_file('js/history.js').to_string()
+}
+
+// open_thread_js returns the probe that opens a forum post by title.
+pub fn open_thread_js() string {
+	return $embed_file('js/open_thread.js').to_string()
 }
 
 // channel_url builds a Discord channel URL from a guild and channel id, for

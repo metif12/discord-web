@@ -72,16 +72,45 @@ No environment variables are needed.
 | `check_session` | Which account and server the tab is showing. Start here. |
 | `list_channels` | Channels of the open server, plus the servers in the sidebar. |
 | `read_messages` | Messages currently rendered in the open channel. |
-| `scroll_up` | Scroll the channel to the top so Discord loads older messages. |
+| `read_full_history` | Walk the open channel from the bottom to the start of its history. |
+| `scroll_history` | Where the message list sits, to check on a history walk. |
 | `read_threads` | Posts in an open forum channel, with reply counts. |
+| `open_thread` | Open a forum post so its replies can be read. |
 | `page_status` | What the tab is showing, to tell empty from still-loading. |
 
 A sensible sequence:
 
 ```
-check_session → list_channels → read_messages
-scroll_up → read_messages        # for older messages, repeat as needed
+check_session → list_channels → read_full_history
 ```
+
+In a forum channel:
+
+```
+read_threads → open_thread → read_full_history
+```
+
+## How history is read
+
+Discord renders only a window of messages and fetches more as you scroll up, so
+reading a channel means scrolling it. `read_full_history` does that by dispatching
+real wheel events at the message list, waiting for each older window to render,
+and collecting messages by id so overlapping windows are not duplicated.
+
+Two details are worth knowing, because both look like bugs and are not:
+
+- **The scroll has to be a trusted event.** Discord's message list is driven by
+  its own scroller component, which ignores synthetic `WheelEvent`s and rewrites
+  `scrollTop` behind your back. Setting `scrollTop` or dispatching an untrusted
+  event silently does nothing. `Input.dispatchMouseEvent` is the only thing that
+  moves it.
+- **The tab has to be in front.** Input dispatch blocks until the renderer
+  acknowledges it, and a background tab never does, so the walk activates the tab
+  before scrolling.
+
+A walk is bounded by wall-clock time. A channel with years of history needs more
+passes than a tool call should spend, so it returns what it gathered and says so
+in its `stopped` reason rather than running until it times out.
 
 ## Limits
 
@@ -89,13 +118,10 @@ These are properties of reading a rendered page, not bugs to be worked around.
 
 - **Only the open tab is read.** To read a different channel, open it in the
   browser first. There is no navigation: the server will not click around, so it
-  cannot be made to navigate somewhere and get stuck.
-- **Only loaded messages are visible.** Discord fetches history on demand, so
-  use `scroll_up` and re-read to walk backwards. A long walk means many round
-  trips.
+  cannot be made to navigate somewhere and get stuck. `open_thread` is the one
+  click, and only within a forum channel already on screen.
+- **History is bounded by time, not completeness.** See above.
 - **No search.** Discord's search needs the API. This reads what is on screen.
-- **Forum posts are lists, not threads.** `read_threads` returns titles, authors,
-  reply counts and previews. Opening one post to read it is a browser action.
 - **Rendered text only.** Markdown, embeds and code blocks come through as the
   visible text; formatting and attachments are flattened.
 
@@ -113,9 +139,10 @@ project never asks for one.
 ```
 main.v                MCP server: tool registration, output formatting
 discord/parse.v       probe result → V structs
+discord/history.v     drives the history walk: scroll, settle, deduplicate
 discord/web.v         embeds the probe scripts
-discord/js/*.js       the probes: session, list, messages, threads, scroll, status
-cdp/client.v          Runtime.evaluate over the debugger WebSocket
+discord/js/*.js       the probes: session, list, messages, threads, history, open_thread
+cdp/client.v          DevTools client: evaluate plus trusted input dispatch
 cdp/http.v            loopback HTTP client for /json/list
 cdp/endpoint.v        picks the Discord tab to attach to
 ```

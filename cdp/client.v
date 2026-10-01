@@ -75,19 +75,69 @@ fn as_obj(v json.Any) ?map[string]json.Any {
 // struct when it reaches a sum-typed field. The reply is then read out of a
 // generic object for the same reason.
 pub fn (mut c Client) eval(expression string) !json.Any {
+	return c.call('Runtime.evaluate',
+		'{"expression":${json.encode(expression)},"returnByValue":true,"awaitPromise":true}')
+}
+
+// send_input dispatches a trusted input event, such as a real mouse wheel.
+//
+// Trusted events matter for scrolling: Discord drives its message list from its
+// own scroller component, which ignores synthetic wheel events and reacts only to
+// events the browser itself produced. A synthetic WheelEvent looks plausible but
+// does nothing, so loading older history requires this path.
+pub fn (mut c Client) wheel(x int, y int, delta_y int) !void {
+	c.call('Input.dispatchMouseEvent',
+		'{"type":"mouseWheel","x":${x},"y":${y},"deltaX":0,"deltaY":${delta_y},"pointerType":"mouse"}') or {
+		return err
+	}
+}
+
+// press sends a key press, which some scrollers accept as a scroll command.
+pub fn (mut c Client) press(key string, key_code int) !void {
+	c.call('Input.dispatchKeyEvent',
+		'{"type":"rawKeyDown","key":"${key}","code":"${key}","windowsVirtualKeyCode":${key_code},"nativeVirtualKeyCode":${key_code}}') or {
+		return err
+	}
+	c.call('Input.dispatchKeyEvent',
+		'{"type":"keyUp","key":"${key}","code":"${key}","windowsVirtualKeyCode":${key_code},"nativeVirtualKeyCode":${key_code}}') or {
+		return err
+	}
+}
+
+// click sends a trusted left click, which is how a post or link is opened.
+//
+// A synthetic MouseEvent in the page is not enough: React's delegated handler
+// discards events it did not observe at the browser input layer, so opening a
+// forum post needs this path.
+pub fn (mut c Client) click(x int, y int) !void {
+	c.call('Input.dispatchMouseEvent', '{"type":"mousePressed","x":${x},"y":${y},"button":"left","clickCount":1,"pointerType":"mouse"}') or {
+		return err
+	}
+	c.call('Input.dispatchMouseEvent', '{"type":"mouseReleased","x":${x},"y":${y},"button":"left","clickCount":1,"pointerType":"mouse"}') or {
+		return err
+	}
+}
+
+// bring_to_front activates the tab.
+//
+// This is required, not cosmetic: input dispatch blocks until the renderer
+// acknowledges it, and a background tab never acknowledges. Mouse events hang
+// without this call.
+pub fn (mut c Client) bring_to_front() !void {
+	c.call('Page.bringToFront', '{}') or { return err }
+}
+
+// call sends one DevTools command with a hand-written params object and returns
+// the command's result value, or null for commands that produce none.
+fn (mut c Client) call(method string, params string) !json.Any {
 	c.next_id++
 	id := c.next_id
-	// expression is embedded as a JSON string literal, so quotes and backslashes
-	// inside the script cannot break the envelope.
-	encoded_expr := json.encode(expression)
-	req := '{"id":${id},"method":"Runtime.evaluate","params":' +
-		'{"expression":${encoded_expr},"returnByValue":true,"awaitPromise":true}}'
-
-	c.ws.write_string(req) or { return error('sending the evaluate request failed: ${err}') }
+	req := '{"id":${id},"method":"${method}","params":${params}}'
+	c.ws.write_string(req) or { return error('sending ${method} failed: ${err}') }
 
 	for {
 		mut msg := c.ws.read_next_message() or {
-			return error('reading the evaluate reply failed: ${err}')
+			return error('reading the ${method} reply failed: ${err}')
 		}
 		defer {
 			unsafe {
@@ -109,17 +159,18 @@ pub fn (mut c Client) eval(expression string) !json.Any {
 		}
 		if e := env['error'] {
 			eo := as_obj(e) or { return error('devtools error') }
-			return error('devtools error: ' + json_str(eo, 'message'))
+			return error('${method} failed: ' + json_str(eo, 'message'))
 		}
 		result := as_obj(env['result'] or { json.Any('null') }) or {
-			return error('devtools reply had no result object')
+			return error('${method} reply had no result object')
 		}
 		if d := result['exceptionDetails'] {
-			do := as_obj(d) or { return error('script threw') }
-			return error('script threw: ' + json_str(do, 'text'))
+			do := as_obj(d) or { return error('${method} script threw') }
+			return error('${method} script threw: ' + json_str(do, 'text'))
 		}
 		inner := as_obj(result['result'] or { json.Any('null') }) or {
-			return error('devtools reply had no inner result')
+			// Most commands reply with an empty result object and no value.
+			return json.Any('null')
 		}
 		return inner['value'] or { json.Any('null') }
 	}

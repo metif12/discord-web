@@ -21,10 +21,13 @@ fn main() {
 		instructions: 'These tools read the page you already have open in Chrome; ' +
 			'they do not call the Discord API and need no token. Start with ' +
 			'check_session, then list_channels to see the channels of the open ' +
-			'server, then read_messages for the channel currently on screen. To ' +
-			'read a different channel, ask the user to open it in the browser ' +
-			'first. Use scroll_up before re-reading when you need older messages, ' +
-			'since Discord only renders what has been loaded.'
+			'server. read_full_history walks the channel that is on screen from the ' +
+			'bottom to the very start of its history, so use it instead of repeated ' +
+			'read_messages calls; it takes a while on a busy channel because it has ' +
+			'to scroll like a person would. read_messages is the quick way to see ' +
+			'only what is already visible. For a different channel, ask the user to ' +
+			'open it in the browser. In a forum channel, read_threads lists the ' +
+			'posts and open_thread opens one so its replies can be read.'
 		enable_logging: true
 	)
 
@@ -119,8 +122,8 @@ fn register_tools(mut server &mcp.Server) {
 		name:        'read_messages'
 		title:       'Read messages'
 		description: 'Read the messages currently rendered in the channel that ' +
-			'is open in the browser. Only what Discord has loaded is visible, so ' +
-			'use scroll_up first when you need older messages.'
+			'is open in the browser. This is the quick way to see what is on ' +
+			'screen; use read_full_history when you need the whole channel.'
 		input_schema: '{"type":"object","properties":{' +
 			'"limit":{"type":"integer","description":"How many of the most recent ' +
 			'messages to return, default 50","default":50}},' +
@@ -146,32 +149,6 @@ fn register_tools(mut server &mcp.Server) {
 		}
 		return mcp.tool_text_result(sb.join('\n'))
 	}) or { eprintln('discord-web: failed to register read_messages: ${err}') }
-
-	server.add_tool(mcp.Tool{
-		name:        'scroll_up'
-		title:       'Load older messages'
-		description: 'Scroll the open channel to the top so Discord fetches ' +
-			'older messages, then report whether the list grew. Repeat this and ' +
-			'call read_messages again to walk back through history.'
-		input_schema: '{"type":"object","properties":{},' +
-			'"additionalProperties":false}'
-		annotations: mcp.ToolAnnotations{
-			read_only_hint:   true
-			destructive_hint: false
-			open_world_hint:  false
-		}
-	}, fn (_ mcp.Context, _ string) !mcp.ToolResult {
-		before := discord.get_status() or { return failure(err.str()) }
-		res := discord.scroll_up() or { return failure(err.str()) }
-		if discord.json_bool(res, 'ok') != true {
-			return mcp.tool_text_result('Could not scroll: ' +
-				discord.json_str(res, 'reason') + '\n' + connection_hint)
-		}
-		return mcp.tool_text_result('Scrolled the message list to the top. ' +
-			'It had ${before.message_count} message(s) and ' +
-			'${before.scroll_height}px of scroll height before. ' +
-			'Wait a moment, then call read_messages again.')
-	}) or { eprintln('discord-web: failed to register scroll_up: ${err}') }
 
 	server.add_tool(mcp.Tool{
 		name:        'read_threads'
@@ -241,6 +218,118 @@ fn register_tools(mut server &mcp.Server) {
 		}
 		return mcp.tool_text_result(sb.join('\n'))
 	}) or { eprintln('discord-web: failed to register page_status: ${err}') }
+
+	register_history_tools(mut server)
+}
+
+// register_history_tools exposes the tools that walk a channel's whole history.
+fn register_history_tools(mut server &mcp.Server) {
+	server.add_tool(mcp.Tool{
+		name:        'read_full_history'
+		title:       'Read full channel history'
+		description: 'Walk the open channel backwards and return its whole ' +
+			'readable history, oldest first. Scrolls the message list the way a ' +
+			'person would, because Discord only renders a window at a time, and ' +
+			'stops when the start of the channel is reached. Prefer this over ' +
+			'repeated read_messages calls. A busy channel takes a while; the ' +
+			'reported range shows how far back it got.'
+		input_schema: '{"type":"object","properties":{' +
+			'"max_messages":{"type":"integer","description":"Cap on collected messages",' +
+			'"default":500}},' +
+			'"additionalProperties":false}'
+		annotations: mcp.ToolAnnotations{
+			read_only_hint:   true
+			destructive_hint: false
+			idempotent_hint:  true
+			open_world_hint:  false
+		}
+	}, fn (ctx mcp.Context, arguments string) !mcp.ToolResult {
+		mut cap := arg_int(arguments, 'max_messages', 500)
+		if cap <= 0 {
+			cap = 500
+		}
+		ctx.notify_progress(0, f64(cap), 'walking channel history')
+		page := discord.collect_history(cap) or {
+			return failure('Could not read the channel history: ${err}')
+		}
+		if page.messages.len == 0 {
+			return mcp.tool_text_result('No messages collected from ${page.url}. ' +
+				'The channel may be empty, still loading, or the tab may not be on ' +
+				'a channel. Call page_status for the current state.')
+		}
+		mut sb := []string{}
+		sb << '${page.total} message(s) from ${page.url}'
+		sb << 'range: ${page.oldest} to ${page.newest}'
+		sb << 'stopped because: ${page.stopped} (${page.passes} scroll passes)'
+		sb << ''
+		mut lines := []string{}
+		for m in page.messages {
+			author := if m.author != '' { m.author } else { 'unknown' }
+			stamp := if m.timestamp != '' { m.timestamp } else { 'unknown time' }
+			lines << '[${stamp}] ${author}: ${m.content.replace("\n", "\n    ")}'
+		}
+		sb << lines.join('\n')
+		return mcp.tool_text_result(sb.join('\n'))
+	}) or { eprintln('discord-web: failed to register read_full_history: ${err}') }
+
+	server.add_tool(mcp.Tool{
+		name:        'scroll_history'
+		title:       'Inspect the message list'
+		description: 'Report where the open channel\'s message list sits: how many ' +
+			'messages are rendered, the scroll position, and the oldest timestamp. ' +
+			'Use it to check progress while history loads.'
+		input_schema: '{"type":"object","properties":{},' +
+			'"additionalProperties":false}'
+		annotations: mcp.ToolAnnotations{
+			read_only_hint:   true
+			destructive_hint: false
+			idempotent_hint:  true
+			open_world_hint:  false
+		}
+	}, fn (_ mcp.Context, _ string) !mcp.ToolResult {
+		st := discord.scroll_history() or {
+			return failure('Reading the message list failed: ${err}')
+		}
+		mut sb := []string{}
+		sb << 'url: ${st.url}'
+		sb << 'rendered messages: ${st.rendered}'
+		sb << 'scroll position: ${st.scroll_top} of ${st.scroll_height}' +
+			' (viewport ${st.client_height})'
+		sb << 'oldest rendered: ${st.oldest_timestamp}'
+		sb << 'newest rendered: ${st.newest_timestamp}'
+		return mcp.tool_text_result(sb.join('\n'))
+	}) or { eprintln('discord-web: failed to register scroll_history: ${err}') }
+
+	server.add_tool(mcp.Tool{
+		name:        'open_thread'
+		title:       'Open a forum post'
+		description: 'Open a forum post in the currently open forum channel so its ' +
+			'replies can be read. The title must match what read_threads returned.'
+		input_schema: '{"type":"object","properties":{' +
+			'"title":{"type":"string","description":"Post title as read_threads showed it"}},' +
+			'"required":["title"],"additionalProperties":false}'
+		annotations: mcp.ToolAnnotations{
+			read_only_hint:   true
+			destructive_hint: false
+			idempotent_hint:  true
+			open_world_hint:  false
+		}
+	}, fn (_ mcp.Context, arguments string) !mcp.ToolResult {
+		title := discord.str_arg(arguments, 'title')
+		if title == '' {
+			return mcp.tool_text_result('title is required.')
+		}
+		res := discord.open_thread(title) or {
+			return failure('Opening the post failed: ${err}')
+		}
+		if !discord.json_bool(res, 'ok') {
+			return mcp.tool_text_result('Could not open the post: ' +
+				discord.json_str(res, 'reason'))
+		}
+		return mcp.tool_text_result('Opened "${discord.json_str(res, 'opened')}". ' +
+			'Wait a moment for the replies to render, then call read_messages or ' +
+			'read_full_history to read the discussion.')
+	}) or { eprintln('discord-web: failed to register open_thread: ${err}') }
 }
 
 // arg_int reads an integer tool argument, falling back to def.

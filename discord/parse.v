@@ -261,11 +261,105 @@ pub fn arg_int(arguments string, key string, def int) int {
 	return json_int(obj, key)
 }
 
-// scroll_up scrolls the open channel's message list to the top, which makes
-// Discord fetch older messages.
-pub fn scroll_up() !map[string]json.Any {
-	return run_probe(scroll_up_js())
+// str_arg reads a string tool argument.
+pub fn str_arg(arguments string, key string) string {
+	if arguments == '' {
+		return ''
+	}
+	o := json.decode[map[string]json.Any](arguments) or { return '' }
+	return json_str(o, key)
 }
+
+// HistoryState is the scroller state reported by the history probe.
+pub type HistoryState = State
+
+// HistoryPage is the result of walking a channel's whole history.
+pub type HistoryPage = HistoryResult
+
+// scroll_history climbs the open channel's message list one burst and reports the
+// scroller state, so a caller can watch history load step by step.
+pub fn scroll_history() !HistoryState {
+	mut client := connect_client() or { return err }
+	state := probe(mut client) or { return err }
+	client.close()
+	return state
+}
+
+// collect_history walks the open channel's whole history and returns every
+// message it collected, oldest first.
+pub fn collect_history(limit int) !HistoryPage {
+	mut client := connect_client() or { return err }
+	page := collect(mut client, limit) or {
+		client.close()
+		return err
+	}
+	client.close()
+	return page
+}
+
+// open_thread opens a forum post by its title.
+//
+// The click is dispatched as a trusted input event rather than a synthetic DOM
+// event, because Discord routes post navigation through React's handler and a
+// synthetic click is ignored. The probe therefore reports coordinates and this
+// function performs the click.
+//
+// A dedicated connection is opened rather than reusing the message-list one:
+// this runs before any thread has rendered, so the "has messages" check that
+// picks a tab would reject the forum pane.
+pub fn open_thread(title string) !map[string]json.Any {
+	encoded := json.encode(title)
+	raw := cdp_client_eval('(' + open_thread_js() + ')(' + encoded + ')') or {
+		return err
+	}
+	mut obj := probe_object(raw) or { return err }
+	if !json_bool(obj, 'ok') {
+		return obj
+	}
+
+	mut client := first_client() or { return err }
+	client.bring_to_front() or {
+		client.close()
+		return err
+	}
+	x := json_int(obj, 'x')
+	y := json_int(obj, 'y')
+	client.click(x, y) or {
+		client.close()
+		return err
+	}
+	client.close()
+	obj['clicked'] = json.Any(true)
+	return obj
+}
+
+// first_client attaches to the first Discord tab, with no content check.
+fn first_client() !&cdp.Client {
+	tabs := cdp.discord_tabs() or { return err }
+	if tabs.len == 0 {
+		return error('no discord.com tab is open in that Chrome instance')
+	}
+	for tab in tabs {
+		if mut c := cdp.connect(tab) {
+			return c
+		}
+	}
+	return error('no usable tab responded')
+}
+
+// probe_object decodes a probe result that is a JSON object rather than a JSON
+// string. The history and collect probes return objects directly because they
+// return their own envelopes.
+fn probe_object(raw json.Any) !map[string]json.Any {
+	if obj := as_object(raw) {
+		return obj
+	}
+	text := raw as string
+	return json.decode[map[string]json.Any](text) or {
+		return error('probe returned malformed JSON')
+	}
+}
+
 // cdp_client_eval attaches to the open discord.com tab and evaluates a probe,
 // returning the JSON document the script produced.
 //
@@ -274,6 +368,41 @@ pub fn scroll_up() !map[string]json.Any {
 // but has not been laid out, so probes against it report an empty message list;
 // falling through to the next tab avoids reporting a channel as empty when it is
 // merely unread.
+// connect_client attaches to the Discord tab and returns an open client.
+//
+// History walking needs a persistent socket: it interleaves input dispatch with
+// probes over tens of seconds, and reconnecting per probe would be slow and would
+// lose the tab activation that input dispatch depends on.
+fn connect_client() !&cdp.Client {
+	tabs := cdp.discord_tabs() or { return err }
+	if tabs.len == 0 {
+		return error('no discord.com tab is open in that Chrome instance')
+	}
+	mut last := 'no usable tab responded'
+	for tab in tabs {
+		mut client := cdp.connect(tab) or { continue }
+		// A tab with rendered messages is the one the user is looking at.
+		value := client.eval('(' + history_state_js() + ')()') or {
+			client.close()
+			last = err.str()
+			continue
+		}
+		if probe_rendered(value) > 0 {
+			return client
+		}
+		client.close()
+		last = 'the open tab has no rendered messages; open a channel first'
+	}
+	return error(last)
+}
+
+// probe_rendered reads the rendered message count out of a history probe result.
+fn probe_rendered(value json.Any) int {
+	text := value as string
+	decoded := json.decode[map[string]json.Any](text) or { return 0 }
+	return json_int(decoded, 'rendered')
+}
+
 fn cdp_client_eval(script string) !json.Any {
 	tabs := cdp.discord_tabs() or { return err }
 	if tabs.len == 0 {
